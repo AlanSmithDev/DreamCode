@@ -1,0 +1,231 @@
+# DreamCode
+
+<p align="center">
+  <img src="docs/assets/dreamcode-logo.svg" width="160" alt="DreamCode pixel cat logo" />
+</p>
+
+DreamCode 是一个 TypeScript 优先的本地 CLI Agent 运行时 MVP。第一阶段聚焦一个小而真实的闭环: 创建会话、构建上下文、调用模型 provider、通过权限引擎执行工具调用、写入 JSONL 事件日志, 并返回带证据的最终总结。
+
+## 品牌主题
+
+DreamCode 使用紫色像素猫作为品牌标识，黑色像素保留眼睛细节；主题色围绕同一紫色展开，并保留终端 UI 所需的语义色。
+
+| Token | Hex | 用途 |
+| --- | --- | --- |
+| Brand | `#a855f7` | 主品牌色、运行状态、重点控件 |
+| Brand light | `#c084fc` | Logo 高光、标题、强调文字 |
+| Brand dark | `#7c3aed` | Logo 阴影、深色状态 |
+| Ink | `#0b0b0f` | 深色背景基准 |
+| Text | `#f5f3ff` | 主文本 |
+| Muted | `#9ca3af` | 次级文本、分隔线 |
+| Success | `#6ee7b7` | 成功状态 |
+| Warning | `#fbbf24` | 警告状态 |
+| Danger | `#f472b6` | 风险、拒绝、错误强调 |
+
+## 快速开始
+
+```bas
+pnpm install
+pnpm dreamcode --provider fake --cwd evals/fixtures/failing-test-js "修复当前项目的测试失败, 并运行测试确认。"
+```
+
+进入交互式 DreamCode shell:
+
+```bash
+pnpm dreamcode
+```
+
+## Windows 桌面版
+
+桌面版面向 Windows 10/11 x64。开发时先构建 Main、preload 和 Renderer，再启动编译后的 Electron 应用：
+
+桌面端正式 UI 使用 React + Vite 实现。页面编排位于 `packages/desktop/src/renderer/app/App.tsx`，组件位于 `packages/desktop/src/renderer/components`，视觉样式位于 `packages/desktop/src/renderer/app/app.css`。`packages/desktop/index.html` 只是 Vite 的空挂载入口，不是 UI/UX 实现文件；不要在其中或新的 `renderer.html` 中实现产品界面。详细边界见 `packages/desktop/README.md`。
+
+```powershell
+pnpm desktop:build
+pnpm --dir packages/desktop exec electron dist-main/main/index.js
+```
+
+Renderer 热更新使用两个终端：
+
+```powershell
+# 终端 1
+pnpm --filter @dreamcode/desktop build:main
+pnpm desktop:dev
+
+# 终端 2
+$env:VITE_DEV_SERVER_URL="http://localhost:5173"
+pnpm --dir packages/desktop exec electron dist-main/main/index.js
+```
+
+确定性验收使用普通 Fake Provider，不需要 API key：
+
+```powershell
+pnpm desktop:e2e
+```
+
+生成 Windows x64 安装包和便携版：
+
+```powershell
+pnpm desktop:dist
+pnpm --filter @dreamcode/desktop chain-test
+pnpm --filter @dreamcode/desktop checksums
+```
+
+输出位于 `packages/desktop/release`：
+
+- `DreamCode-Setup-0.1.0-x64.exe`：双击后按向导完成当前用户安装，可选择安装目录。
+- `DreamCode-Portable-0.1.0-x64.exe`：双击即可直接启动，无需安装或管理员权限。
+- `chain-test-report.json`：便携版完整任务、命令、重启和 Session 续聊证据。
+- `SHA256SUMS.txt`：两个可执行文件的 SHA-256。
+
+桌面版配置与 Session 默认保存在 `%USERPROFILE%\.dreamcode`。API key 可直接保存到配置文件，也可以保存环境变量名；直接保存时为明文，请只在受信任的 Windows 账户中使用。卸载 NSIS 应用不会删除该目录中的配置和 Session 数据；需要清除时由用户自行备份后删除。便携版同样使用这一数据目录，不会把密钥写入可执行文件所在目录。
+
+常用 slash 命令:
+
+```text
+/llm       选择 provider/model 并配置 API key
+/status    查看当前 cwd、mode、model 和配置文件路径
+/mode MODE 切换模式: plan | guided | yolo | full
+/cwd PATH  切换工作区目录
+/sessions  查看当前工作区历史 session
+/diff ID   查看 session 文件变更 diff
+/skills    列出可用 Skill
+/mcp       列出配置的 MCP 工具
+/clear     清空当前 REPL 的对话摘要
+/config    显示配置文件路径
+/exit      退出
+```
+
+`/llm` 使用方向键选择 provider/model, 并默认把 API key 明文保存到 `~/.dreamcode/config.json`。后续可以直接运行 `pnpm dreamcode` 使用已保存的模型配置。
+
+构建并运行编译后的 CLI:
+
+```bash
+pnpm build
+node packages/cli/dist/main.js --provider fake --cwd evals/fixtures/readme-update "根据 package.json 和源码更新 README 的使用说明。"
+```
+
+查看可用模型 provider:
+
+```bash
+pnpm dreamcode --list-providers
+```
+
+使用 DeepSeek 做真实验收:
+
+```powershell
+pnpm dreamcode
+# 在 REPL 中输入 /llm, 用方向键选择 deepseek / deepseek-v4-pro, 粘贴 API key 保存到 config.json。
+# 然后输入:
+# 根据 package.json 和源码更新 README 的使用说明。
+```
+
+也可以直接在 CLI 中传入 API key。注意这种方式可能进入 shell 历史记录, 日常使用更推荐 `/llm` 写入本地 config.json:
+
+```powershell
+pnpm dreamcode --provider deepseek --model deepseek-v4-pro --api-key "你的 DeepSeek API Key" "分析当前项目结构"
+```
+
+## MVP 能力
+
+- CLI 入口: `dreamcode [prompt...] --mode plan|guided|yolo|full --cwd <path>`。
+- 无 prompt 时进入交互式 REPL, 支持持续对话和 slash command。
+- 流式 CLI 输出: 展示模型文本、工具调用、权限决策、工具状态、文件变更和最终总结。
+- 持久配置: `~/.dreamcode/config.json`, 支持 `/llm` 保存 provider/model/API key 配置。
+- JSONL 事件日志: `~/.dreamcode/sessions/<session-id>/events.jsonl`。
+- Session history / resume:
+  - `dreamcode sessions`
+  - `dreamcode show <session-id>`
+  - `dreamcode resume <session-id> "继续任务"`
+  - `dreamcode diff <session-id>`
+  - `dreamcode rollback <session-id> --file <path>`
+  - `dreamcode index rebuild`
+- 派生索引: `~/.dreamcode/index.sqlite.json`, 可从 JSONL sessions 重建；JSONL 仍是事实源。
+- Agent 主循环: 支持单条 assistant message 提出多个 ToolCall；只读调用组成有界并发 wave，Shell、写入、后台任务和交互工具作为 exclusive barrier。
+- Fake 模型 provider: 用于确定性的集成测试。
+- OpenAI-compatible 模型 provider 基础设施:
+  - 内置 `openai`、`deepseek`、`qwen`、`kimi`、`zhipu`、`siliconflow`、`minimax` preset。
+  - 支持 `openai-compatible` 自定义 provider。
+  - CLI 支持 `--provider`、`--model`、`--api-key`、`--api-key-env`、`--base-url`、`--list-providers`。
+- Tool Registry: 注册经过 Zod 校验的内置工具:
+  - `file.read`, `file.write`, `file.patch`
+  - `search.grep`, `search.glob`
+  - Windows: `pwsh`; Unix: `bash`
+  - `job_output`, `job_list`, `job_kill`
+  - `git.status`, `git.diff`
+  - `todo.write`, `question.ask`
+  - `web.search`, `web.fetch`
+  - `skill`
+  - `mcp.list`, `mcp.call`
+  - Core 默认将 Tool Registry 中的全部工具 schema 发送给模型，包括 Web、Skill 和 MCP；实际执行仍由 Permission Engine 控制。
+- 命令执行采用平台专属 Shell：Windows 使用 `pwsh`，Unix 使用 `bash`；长任务通过 `run_in_background` 启动，并使用 `job_output`、`job_list`、`job_kill` 管理。
+- 长期程序由 session 隔离的 Process Supervisor 管理，日志直接落盘并受容量限制，宿主正常退出或 session 删除时清理活动进程。
+- 命令结果提供机器可读的错误分类、execution outcome、4 KiB stdout/stderr 首尾预览和完整 artifact 引用。
+- Tool Result Aggregator 保证每个 ToolCall 都有独立结果，同时对一次模型步骤的全部工具结果施加共享字符预算，避免 N 个结果线性放大下一轮上下文。
+- `file.read` 返回带真实行号的窗口并支持 `offset` / `limit` 精确续读；文件快照和回滚由 `file.write` / `file.patch` 在写入前保存 snapshot，同时保存 patch artifact。
+- Permission Engine: 实现 Safe YOLO v0 规则:
+  - 自动允许任意本地路径的普通读取与搜索，以及低风险 workspace 写入、只读 git、常见 test/lint/build 命令。
+  - 对敏感文件读取、安装依赖、未知 shell 命令和疑似网络命令进行询问。
+  - 拒绝 workspace 外写入、递归危险删除、强推、硬重置等高风险动作。
+- Safe YOLO v1 扩展:
+  - Web 只读访问在 yolo/full 下允许, guided 下询问, plan 下拒绝。
+  - MCP 工具默认询问, full mode 才自动允许配置内 MCP tool。
+  - dependency install 标记为 `install_dependency` 风险。
+- Context Builder: 加载 `DREAMCODE.md`、包含 todo 状态，并按实际 messages、工具 schema 与 Provider 协议开销估算和压缩上下文。
+- Model usage 区分完整输入、缓存命中输入、未缓存输入和输出 Token；缓存输入仍计入上下文容量。
+- Eval fixtures: 覆盖失败测试修复、README 更新和安全拦截。
+
+## 验证
+
+```bash
+pnpm lint
+pnpm typecheck
+pnpm test
+pnpm build
+```
+
+当前测试覆盖:
+
+- `~/.dreamcode/config.json` 的配置读写和 active profile。
+- permission allow/ask/deny 与 workspace path boundary。
+- file patch 的 changed-file 记录。
+- shell timeout 处理。
+- runtime 平台事实、结构化 process 执行、Shell 单表达式校验和输出外置。
+- 可选工具 schema 分层、回合内紧凑缓存命中和缓存失效。
+- Provider 缓存 Token 归一化与包含工具 schema 的请求前估算。
+- fake model 端到端修复失败的 JavaScript 测试。
+- 敏感文件读取授权和破坏性删除的拒绝逻辑。
+- OpenAI-compatible tool schema 顶层 object 兼容性。
+- 写入后重复只读检查的停止保护。
+- Phase 2 覆盖:
+  - session resume 和 JSONL replay。
+  - session index rebuild。
+  - snapshot rollback。
+  - local web fetch artifact。
+  - skill 渐进读取。
+  - fake MCP stdio server tool call。
+
+真实模型链路评测见 [docs/evals/real-model-cinemo-eval.md](docs/evals/real-model-cinemo-eval.md)。fake model 只作为确定性运行时回归, 真实能力以 DeepSeek 读取和理解 `D:\Files\Github\Cinemo`、连续问答、写入项目文档的闭环为准。
+
+Phase 2 真实模型验收已使用本地 DeepSeek 配置跑通:
+
+- session: `sess_mrd8o35b_ro5orl8t`
+- workspace: 临时 `readme-update` fixture 副本
+- initial turn: 读取 `package.json` / `README.md`, 创建 `PHASE2_REAL_MODEL_CHECK.md`
+- resume turn: `dreamcode resume sess_mrd8o35b_ro5orl8t ...`, 追加 `Phase 2 resume turn OK`
+- `dreamcode show` 显示 2 个 turns, `dreamcode diff` 显示 create + update diff。
+
+## 包结构
+
+```text
+packages/
+  cli/       CLI 参数解析和终端流式渲染
+  core/      Agent 主循环、会话编排、最终总结
+  context/   上下文构建器和压缩辅助函数
+  models/    fake 与 OpenAI-compatible 模型 provider
+  safety/    权限引擎、路径边界、命令分类器
+  shared/    共享类型、schema、id、事件
+  store/     JSONL 事件日志和会话目录辅助函数
+  tools/     工具注册表和内置工具
+```
