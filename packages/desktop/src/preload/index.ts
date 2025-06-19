@@ -1,0 +1,170 @@
+import { contextBridge, ipcRenderer } from "electron";
+import type {
+  ApprovalResponse,
+  CreateProfileRequest,
+  DesktopApi,
+  DesktopAttachment,
+  DesktopAttachmentImportResult,
+  DesktopBootstrap,
+  DesktopIpcResponse,
+  DesktopRunStatus,
+  DesktopSkillSnapshot,
+  DesktopTerminalOutput,
+  QuestionResponse,
+  RollbackRequest,
+  StartTurnRequest,
+  TestProfileRequest,
+  UpdateProfileRequest,
+  WebSearchCredentialRequest,
+} from "../shared/contracts";
+import { sanitizeDesktopError } from "../shared/contracts";
+
+interface IpcRendererLike {
+  invoke(channel: string, ...arguments_: unknown[]): Promise<unknown>;
+  on(channel: string, listener: (event: unknown, message: unknown) => void): void;
+  removeListener(channel: string, listener: (event: unknown, message: unknown) => void): void;
+}
+
+export function createDesktopApi(renderer: IpcRendererLike): DesktopApi {
+  return {
+    bootstrap: () => invoke<DesktopBootstrap>(renderer, "desktop:bootstrap"),
+    chooseWorkspace: () => invoke<string | undefined>(renderer, "desktop:choose-workspace"),
+    chooseAttachments: (existing: DesktopAttachment[] = []) =>
+      invoke<DesktopAttachmentImportResult>(renderer, "desktop:choose-attachments", existing),
+    stageAttachmentBytes: (request) =>
+      invoke<DesktopAttachmentImportResult>(renderer, "desktop:stage-attachment-bytes", request),
+    discardAttachments: (ids) =>
+      invoke<void>(renderer, "desktop:discard-attachments", { ids }),
+    readAttachment: async (request) =>
+      toUint8Array(await invoke<unknown>(renderer, "desktop:read-attachment", request)),
+    openWorkspace: (workspaceRoot: string) =>
+      invoke<void>(renderer, "desktop:open-workspace", workspaceRoot),
+    createProfile: (request: CreateProfileRequest) =>
+      invoke<DesktopBootstrap>(renderer, "desktop:create-profile", request),
+    updateProfile: (request: UpdateProfileRequest) =>
+      invoke<DesktopBootstrap>(renderer, "desktop:update-profile", request),
+    deleteProfile: (profileId: string) =>
+      invoke<DesktopBootstrap>(renderer, "desktop:delete-profile", profileId),
+    setDefaultProfile: (profileId: string) =>
+      invoke<DesktopBootstrap>(renderer, "desktop:set-default-profile", { profileId }),
+    testProfile: (request: TestProfileRequest) => invoke(renderer, "desktop:test-profile", request),
+    updateWebSearchCredential: (request: WebSearchCredentialRequest) =>
+      invoke<DesktopBootstrap>(renderer, "desktop:update-web-search-credential", request),
+    listSkills: (workspaceRoot) =>
+      invoke<DesktopSkillSnapshot>(renderer, "desktop:list-skills", { workspaceRoot }),
+    rescanSkills: (workspaceRoot) =>
+      invoke<DesktopSkillSnapshot>(renderer, "desktop:rescan-skills", { workspaceRoot }),
+    setSkillEnabled: (request) =>
+      invoke<DesktopSkillSnapshot>(renderer, "desktop:set-skill-enabled", request),
+    setSkillRoots: (request) =>
+      invoke<DesktopSkillSnapshot>(renderer, "desktop:set-skill-roots", request),
+    installSkill: (request) =>
+      invoke<DesktopSkillSnapshot>(renderer, "desktop:install-skill", request),
+    updateSkill: (request) =>
+      invoke<DesktopSkillSnapshot>(renderer, "desktop:update-skill", request),
+    rollbackSkill: (request) =>
+      invoke<DesktopSkillSnapshot>(renderer, "desktop:rollback-skill", request),
+    uninstallSkill: (request) =>
+      invoke<DesktopSkillSnapshot>(renderer, "desktop:uninstall-skill", request),
+    saveProject: (request) => invoke<DesktopBootstrap>(renderer, "desktop:save-project", request),
+    createProject: (request) => invoke(renderer, "desktop:create-project", request),
+    deleteProject: (workspaceRoot) =>
+      invoke<DesktopBootstrap>(renderer, "desktop:delete-project", workspaceRoot),
+    deleteSession: (sessionId) =>
+      invoke<DesktopBootstrap>(renderer, "desktop:delete-session", sessionId),
+    renameSession: (request) =>
+      invoke<DesktopBootstrap>(renderer, "desktop:rename-session", request),
+    setSessionPinned: (request) =>
+      invoke<DesktopBootstrap>(renderer, "desktop:set-session-pinned", request),
+    startTurn: (request: StartTurnRequest) =>
+      invoke<{ runId: string }>(renderer, "desktop:start-turn", request),
+    stopTurn: (runId: string) => invoke<void>(renderer, "desktop:stop-turn", runId),
+    startTerminal: (cwd: string) => invoke(renderer, "desktop:terminal-start", cwd),
+    writeTerminal: (terminalId: string, data: string) =>
+      invoke<void>(renderer, "desktop:terminal-write", { terminalId, data }),
+    resizeTerminal: (terminalId: string, columns: number, rows: number) =>
+      invoke<void>(renderer, "desktop:terminal-resize", { terminalId, columns, rows }),
+    closeTerminal: (terminalId: string) =>
+      invoke<void>(renderer, "desktop:terminal-close", terminalId),
+    readSession: (sessionId: string) => invoke(renderer, "desktop:read-session", sessionId),
+    readDiff: (request: RollbackRequest) => invoke<string>(renderer, "desktop:read-diff", request),
+    rollback: (request: RollbackRequest) => invoke(renderer, "desktop:rollback", request),
+    respondApproval: (response: ApprovalResponse) =>
+      invoke<void>(renderer, "desktop:approval-response", response),
+    respondQuestion: (response: QuestionResponse) =>
+      invoke<void>(renderer, "desktop:question-response", response),
+    onRunEvent: (listener) => subscribe(renderer, "desktop:run-event", listener),
+    onApprovalRequest: (listener) => subscribe(renderer, "desktop:approval-request", listener),
+    onQuestionRequest: (listener) => subscribe(renderer, "desktop:question-request", listener),
+    onRunStatus: (listener) =>
+      subscribe<DesktopRunStatus>(renderer, "desktop:run-status", listener),
+    onTerminalOutput: (listener) =>
+      subscribe<DesktopTerminalOutput>(renderer, "desktop:terminal-output", listener),
+  } satisfies DesktopApi;
+}
+
+
+function toUint8Array(value: unknown): Uint8Array {
+  if (value instanceof Uint8Array) return value;
+  if (value instanceof ArrayBuffer) return new Uint8Array(value);
+  if (value && typeof value === "object" && (value as { type?: unknown }).type === "Buffer") {
+    const data = (value as { data?: unknown }).data;
+    if (Array.isArray(data) && data.every((item) => Number.isInteger(item))) return new Uint8Array(data);
+  }
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([key, item]) => /^\d+$/.test(key) && Number.isInteger(item))
+      .sort(([left], [right]) => Number(left) - Number(right));
+    if (entries.length) return new Uint8Array(entries.map(([, item]) => Number(item)));
+  }
+  throw new Error("Attachment bytes are unavailable.");
+}
+function invoke<T>(
+  renderer: IpcRendererLike,
+  channel: string,
+  ...arguments_: unknown[]
+): Promise<T> {
+  return renderer.invoke(channel, ...arguments_).then((response) => unwrapResponse<T>(response));
+}
+
+function unwrapResponse<T>(response: unknown): T {
+  if (isSuccessfulResponse(response)) {
+    return response.value as T;
+  }
+  if (isFailedResponse(response)) {
+    throw sanitizeDesktopError(response.error);
+  }
+  throw sanitizeDesktopError(undefined);
+}
+
+function isSuccessfulResponse(
+  response: unknown,
+): response is DesktopIpcResponse<unknown> & { ok: true } {
+  return Boolean(
+    response && typeof response === "object" && "ok" in response && response.ok === true,
+  );
+}
+
+function isFailedResponse(
+  response: unknown,
+): response is DesktopIpcResponse<unknown> & { ok: false } {
+  return Boolean(
+    response &&
+      typeof response === "object" &&
+      "ok" in response &&
+      response.ok === false &&
+      "error" in response,
+  );
+}
+
+function subscribe<T>(
+  renderer: IpcRendererLike,
+  channel: string,
+  listener: (message: T) => void,
+): () => void {
+  const wrapped = (_event: unknown, message: unknown) => listener(message as T);
+  renderer.on(channel, wrapped);
+  return () => renderer.removeListener(channel, wrapped);
+}
+
+contextBridge.exposeInMainWorld("dreamcode", createDesktopApi(ipcRenderer));
