@@ -1,0 +1,406 @@
+import type { AgentEvent, MediaAttachmentKind, RunMode } from "@dreamcode/shared";
+import type { ReplayedSessionState, SessionListItem } from "@dreamcode/store";
+import { z } from "zod";
+
+export const workspaceRootSchema = z.string().trim().min(1);
+
+const attachmentIdSchema = z.string().trim().regex(/^[A-Za-z0-9_-]+$/);
+
+export const startTurnRequestSchema = z.object({
+  prompt: z.string(),
+  workspaceRoot: workspaceRootSchema,
+  mode: z.enum(["plan", "guided", "yolo", "full"]),
+  profileId: z.string().trim().min(1).optional(),
+  model: z.string().trim().min(1).optional(),
+  sessionId: z.string().trim().min(1).optional(),
+  attachmentIds: z.array(attachmentIdSchema).max(10).optional(),
+}).refine((value) => value.prompt.trim().length > 0 || Boolean(value.attachmentIds?.length), {
+  message: "A prompt or at least one attachment is required.",
+});
+
+export type StartTurnRequest = z.infer<typeof startTurnRequestSchema> & { mode: RunMode };
+
+export interface DesktopAttachment {
+  id: string;
+  name: string;
+  kind: MediaAttachmentKind;
+  mimeType: string;
+  size: number;
+  sha256: string;
+}
+
+export interface DesktopAttachmentImportError {
+  name: string;
+  code: "unsupported_type" | "file_too_large" | "total_too_large" | "invalid_media" | "disk_full" | "read_failed";
+  message: string;
+}
+
+export interface DesktopAttachmentImportResult {
+  attachments: DesktopAttachment[];
+  errors: DesktopAttachmentImportError[];
+}
+
+export const stageAttachmentBytesSchema = z.object({
+  files: z.array(z.object({
+    name: z.string().trim().min(1).max(255),
+    bytes: z.custom<Uint8Array>((value) => value instanceof Uint8Array),
+  })).max(10),
+  existing: z.array(z.object({
+    id: attachmentIdSchema,
+    name: z.string(),
+    kind: z.enum(["image", "audio", "video"]),
+    mimeType: z.string(),
+    size: z.number().nonnegative(),
+    sha256: z.string(),
+  })).max(10).optional(),
+});
+
+export const attachmentIdsRequestSchema = z.object({ ids: z.array(attachmentIdSchema).max(10) });
+
+const httpUrlSchema = z
+  .string()
+  .trim()
+  .url()
+  .refine((value) => value.startsWith("http://") || value.startsWith("https://"));
+const environmentVariableSchema = z
+  .string()
+  .trim()
+  .regex(/^[A-Za-z_][A-Za-z0-9_]*$/);
+export const credentialActionSchema = z.discriminatedUnion("mode", [
+  z.object({ mode: z.literal("preserve") }),
+  z.object({ mode: z.literal("clear") }),
+  z.object({ mode: z.literal("inline"), apiKey: z.string().trim().min(1) }),
+  z.object({ mode: z.literal("environment"), apiKeyEnv: environmentVariableSchema }),
+]);
+const profileDraftSchema = z.object({
+  alias: z.string().trim().min(1),
+  provider: z.string().trim().min(1),
+  model: z.string().trim().min(1),
+  baseURL: httpUrlSchema.optional(),
+  credential: credentialActionSchema,
+});
+export const createProfileRequestSchema = profileDraftSchema;
+export const updateProfileRequestSchema = profileDraftSchema.extend({
+  profileId: z.string().trim().min(1),
+});
+export const profileIdSchema = z.string().trim().min(1);
+export const setDefaultProfileRequestSchema = z.object({ profileId: profileIdSchema });
+export const testProfileRequestSchema = profileDraftSchema.extend({
+  profileId: profileIdSchema.optional(),
+});
+export const webSearchCredentialRequestSchema = z.discriminatedUnion("mode", [
+  z.object({ mode: z.literal("preserve") }),
+  z.object({ mode: z.literal("clear") }),
+  z.object({ mode: z.literal("inline"), apiKey: z.string().trim().min(1) }),
+]);
+export type WebSearchCredentialRequest = z.infer<typeof webSearchCredentialRequestSchema>;
+
+export const sessionIdSchema = z.string().trim().min(1);
+export const runIdSchema = z.string().trim().min(1);
+export const readAttachmentRequestSchema = z.object({
+  attachmentId: attachmentIdSchema,
+  sessionId: attachmentIdSchema.optional(),
+});
+
+export const rollbackRequestSchema = z.object({
+  sessionId: sessionIdSchema,
+  filePath: z.string().trim().min(1),
+});
+
+export const projectRequestSchema = z.object({
+  workspaceRoot: workspaceRootSchema,
+  name: z.string().trim().min(1),
+  pinned: z.boolean().optional(),
+});
+export const createProjectRequestSchema = z.object({
+  name: z.string().trim().min(1).max(80),
+});
+export const sessionPinRequestSchema = z.object({
+  sessionId: sessionIdSchema,
+  pinned: z.boolean(),
+});
+export const sessionRenameRequestSchema = z.object({
+  sessionId: sessionIdSchema,
+  title: z.string().trim().min(1).max(80),
+});
+
+export const approvalResponseSchema = z.object({
+  runId: runIdSchema,
+  requestId: z.string().trim().min(1),
+  approved: z.boolean(),
+});
+
+export const questionResponseSchema = z.object({
+  runId: runIdSchema,
+  requestId: z.string().trim().min(1),
+  answer: z.string().trim().min(1),
+});
+
+export const skillWorkspaceRequestSchema = z.object({
+  workspaceRoot: workspaceRootSchema.optional(),
+});
+export const skillToggleRequestSchema = skillWorkspaceRequestSchema.extend({
+  skillId: z.string().trim().min(1),
+  enabled: z.boolean(),
+});
+export const skillRootsRequestSchema = skillWorkspaceRequestSchema.extend({
+  roots: z.array(z.string().trim().min(1)),
+});
+export const skillInstallRequestSchema = z.object({
+  workspaceRoot: workspaceRootSchema.optional(),
+  scope: z.enum(["user", "project"]),
+  source: z.discriminatedUnion("type", [
+    z.object({ type: z.literal("directory"), location: z.string().trim().min(1), subpath: z.string().trim().min(1).optional() }),
+    z.object({ type: z.literal("zip"), location: z.string().trim().min(1), subpath: z.string().trim().min(1).optional() }),
+    z.object({ type: z.literal("git"), location: z.string().trim().min(1), ref: z.string().trim().min(1).optional(), subpath: z.string().trim().min(1).optional() }),
+  ]),
+  confirmations: z.object({
+    overwrite: z.boolean().optional(),
+    downgrade: z.boolean().optional(),
+    sourceChange: z.boolean().optional(),
+    localChanges: z.boolean().optional(),
+    sameVersionContentChange: z.boolean().optional(),
+  }).optional(),
+});
+export const skillLifecycleRequestSchema = skillWorkspaceRequestSchema.extend({
+  skillId: z.string().trim().min(1),
+  confirmations: skillInstallRequestSchema.shape.confirmations,
+});
+
+export interface DesktopRunEvent {
+  runId: string;
+  event: AgentEvent;
+}
+export interface DesktopTerminalOutput {
+  terminalId: string;
+  stream: "stdout" | "stderr";
+  text: string;
+}
+export interface DesktopError {
+  code: string;
+  message: string;
+  recoverable: boolean;
+}
+export type DesktopIpcResponse<T> = { ok: true; value: T } | { ok: false; error: DesktopError };
+
+const safeDesktopErrorMessages: Record<string, string> = {
+  invalid_request: "Request is invalid.",
+  run_already_active: "Another turn is already active.",
+  stale_request: "Request is no longer pending.",
+  stale_run: "Run is no longer active.",
+  run_interrupted: "Run was interrupted.",
+  config_load_failed: "Failed to load DreamCode configuration.",
+  provider_setup_failed: "Provider could not be configured.",
+  profile_not_found: "No matching model profile is configured.",
+  profile_alias_conflict: "A model profile with this alias already exists.",
+  profile_validation_failed: "Model profile is invalid.",
+  profile_connection_failed: "Model connection test failed.",
+  run_failed: "Run failed.",
+  status_delivery_failed: "Run status could not be delivered.",
+  skill_not_found: "Skill is no longer available.",
+  skill_workspace_required: "A project workspace is required for this action.",
+  source_invalid: "The Skill source is invalid.",
+  package_unsafe: "The Skill package contains unsafe files.",
+  package_limit_exceeded: "The Skill package exceeds the safety limits.",
+  git_failed: "The Skill Git source could not be fetched.",
+  install_conflict: "The Skill installation needs confirmation before it can continue.",
+  installation_not_found: "The managed Skill installation was not found.",
+  rollback_unavailable: "This Skill has no previous version to restore.",
+  managed_path_invalid: "DreamCode refused to modify an unmanaged Skill path.",
+};
+
+export function sanitizeDesktopError(error: unknown): DesktopError {
+  if (error && typeof error === "object") {
+    const candidate = error as Partial<DesktopError>;
+    const message =
+      typeof candidate.code === "string" ? safeDesktopErrorMessages[candidate.code] : undefined;
+    if (message) {
+      return {
+        code: candidate.code as string,
+        message,
+        recoverable: typeof candidate.recoverable === "boolean" ? candidate.recoverable : true,
+      };
+    }
+  }
+  return { code: "internal_error", message: "Request failed.", recoverable: true };
+}
+
+export interface DesktopApprovalRequest {
+  runId: string;
+  requestId: string;
+  tool: string;
+  input: unknown;
+  reason: string;
+}
+export interface DesktopQuestionRequest {
+  runId: string;
+  requestId: string;
+  question: string;
+}
+export interface DesktopRunStatus {
+  runId: string;
+  status: "running" | "completed" | "failed" | "interrupted";
+  error?: DesktopError;
+  sessionId?: string;
+  draftRestored?: boolean;
+}
+export type CredentialAction = z.infer<typeof credentialActionSchema>;
+export interface ProfileDraftRequest {
+  alias: string;
+  provider: string;
+  model: string;
+  baseURL?: string;
+  credential: CredentialAction;
+}
+export type CreateProfileRequest = ProfileDraftRequest;
+export type UpdateProfileRequest = ProfileDraftRequest & { profileId: string };
+export type TestProfileRequest = ProfileDraftRequest & { profileId?: string };
+export type ProfileConnectionResult =
+  | { ok: true; message: string }
+  | {
+      ok: false;
+      code:
+        | "credential_missing"
+        | "credential_invalid"
+        | "model_not_found"
+        | "network_error"
+        | "timeout"
+        | "server_error"
+        | "empty_response"
+        | "profile_not_found";
+      message: string;
+    };
+export interface ApprovalResponse {
+  runId: string;
+  requestId: string;
+  approved: boolean;
+}
+export interface QuestionResponse {
+  runId: string;
+  requestId: string;
+  answer: string;
+}
+export interface RollbackRequest {
+  sessionId: string;
+  filePath: string;
+}
+export interface DesktopBootstrap {
+  webSearch?: {
+    provider: "exa";
+    credentialSource: "inline" | "environment" | "none";
+    credentialAvailable: boolean;
+  };
+  profiles: Array<{
+    id: string;
+    alias: string;
+    provider: string;
+    model?: string;
+    baseURL?: string;
+    credentialSource: "inline" | "environment" | "none";
+    apiKeyEnv?: string;
+    credentialAvailable: boolean;
+  }>;
+  currentProfileId?: string;
+  presets: Array<{
+    id: string;
+    displayName: string;
+    defaultModel: string;
+    defaultBaseURL?: string;
+    requiresBaseURL?: boolean;
+    models?: ReadonlyArray<{ id: string; label?: string; contextWindowTokens?: number }>;
+  }>;
+  sessions: SessionListItem[];
+  projects?: Array<{ workspaceRoot: string; name: string; pinned?: boolean; createdAt: string }>;
+  pinnedSessionIds?: string[];
+}
+export interface DesktopSkillItem {
+  skillId: string;
+  name: string;
+  invocationName?: string;
+  description: string;
+  version?: string;
+  source: "built_in" | "system" | "user" | "project" | "plugin";
+  provider: string;
+  capabilities: Array<
+    "filesystem.read" | "filesystem.write" | "process.execute" | "network.access" | "mcp.use"
+  >;
+  allowImplicitInvocation: boolean;
+  pluginDisplayName?: string;
+  pluginVersion?: string;
+  pluginManagementAction?: string;
+  path: string;
+  enabled: boolean;
+  valid: boolean;
+  resolution: "resolved" | "overridden" | "conflicted" | "ineligible";
+  managed: boolean;
+  canUninstall: boolean;
+  canUpdate: boolean;
+  canRollback: boolean;
+  diagnostics: string[];
+}
+export interface DesktopSkillSnapshot {
+  generation: number;
+  skills: DesktopSkillItem[];
+  customRoots: string[];
+  diagnostics: Array<{ code: string; message: string; path: string }>;
+}
+export type SkillInstallRequest = z.infer<typeof skillInstallRequestSchema>;
+export interface DesktopSessionDetail extends ReplayedSessionState {
+  events?: AgentEvent[];
+}
+export interface DesktopApi {
+  bootstrap(): Promise<DesktopBootstrap>;
+  chooseWorkspace(): Promise<string | undefined>;
+  chooseAttachments(existing?: DesktopAttachment[]): Promise<DesktopAttachmentImportResult>;
+  stageAttachmentBytes(request: {
+    files: Array<{ name: string; bytes: Uint8Array }>;
+    existing?: DesktopAttachment[];
+  }): Promise<DesktopAttachmentImportResult>;
+  discardAttachments(ids: string[]): Promise<void>;
+  readAttachment(request: { attachmentId: string; sessionId?: string }): Promise<Uint8Array>;
+  openWorkspace(workspaceRoot: string): Promise<void>;
+  createProfile(request: CreateProfileRequest): Promise<DesktopBootstrap>;
+  updateProfile(request: UpdateProfileRequest): Promise<DesktopBootstrap>;
+  deleteProfile(profileId: string): Promise<DesktopBootstrap>;
+  setDefaultProfile(profileId: string): Promise<DesktopBootstrap>;
+  testProfile(request: TestProfileRequest): Promise<ProfileConnectionResult>;
+  updateWebSearchCredential(request: WebSearchCredentialRequest): Promise<DesktopBootstrap>;
+  listSkills(workspaceRoot?: string): Promise<DesktopSkillSnapshot>;
+  rescanSkills(workspaceRoot?: string): Promise<DesktopSkillSnapshot>;
+  setSkillEnabled(request: { workspaceRoot?: string; skillId: string; enabled: boolean }): Promise<DesktopSkillSnapshot>;
+  setSkillRoots(request: { workspaceRoot?: string; roots: string[] }): Promise<DesktopSkillSnapshot>;
+  installSkill(request: SkillInstallRequest): Promise<DesktopSkillSnapshot>;
+  updateSkill(request: { workspaceRoot?: string; skillId: string; confirmations?: SkillInstallRequest["confirmations"] }): Promise<DesktopSkillSnapshot>;
+  rollbackSkill(request: { workspaceRoot?: string; skillId: string }): Promise<DesktopSkillSnapshot>;
+  uninstallSkill(request: { workspaceRoot?: string; skillId: string }): Promise<DesktopSkillSnapshot>;
+  saveProject(request: {
+    workspaceRoot: string;
+    name: string;
+    pinned?: boolean;
+  }): Promise<DesktopBootstrap>;
+  createProject(request: {
+    name: string;
+  }): Promise<{ bootstrap: DesktopBootstrap; workspaceRoot: string }>;
+  deleteProject(workspaceRoot: string): Promise<DesktopBootstrap>;
+  deleteSession(sessionId: string): Promise<DesktopBootstrap>;
+  renameSession(request: { sessionId: string; title: string }): Promise<DesktopBootstrap>;
+  setSessionPinned(request: { sessionId: string; pinned: boolean }): Promise<DesktopBootstrap>;
+  startTurn(request: StartTurnRequest): Promise<{ runId: string }>;
+  stopTurn(runId: string): Promise<void>;
+  startTerminal(cwd: string): Promise<{ terminalId: string }>;
+  writeTerminal(terminalId: string, data: string): Promise<void>;
+  resizeTerminal(terminalId: string, columns: number, rows: number): Promise<void>;
+  closeTerminal(terminalId: string): Promise<void>;
+  readSession(sessionId: string): Promise<DesktopSessionDetail>;
+  readDiff(request: RollbackRequest): Promise<string>;
+  rollback(
+    request: RollbackRequest,
+  ): Promise<{ rolledBackFiles: string[]; failedFiles: Array<{ path: string; reason: string }> }>;
+  respondApproval(response: ApprovalResponse): Promise<void>;
+  respondQuestion(response: QuestionResponse): Promise<void>;
+  onRunEvent(listener: (message: DesktopRunEvent) => void): () => void;
+  onApprovalRequest(listener: (request: DesktopApprovalRequest) => void): () => void;
+  onQuestionRequest(listener: (request: DesktopQuestionRequest) => void): () => void;
+  onRunStatus(listener: (status: DesktopRunStatus) => void): () => void;
+  onTerminalOutput(listener: (output: DesktopTerminalOutput) => void): () => void;
+}
