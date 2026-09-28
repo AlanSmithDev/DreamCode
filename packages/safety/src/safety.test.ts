@@ -1,0 +1,228 @@
+import path from "node:path";
+import { describe, expect, it } from "vitest";
+import {
+  buildPermissionCapabilityContract,
+  classifyCommand,
+  PermissionEngine,
+  resolveWorkspacePath,
+} from "./index";
+
+describe("workspace path boundary", () => {
+  it("marks paths inside and outside the workspace", () => {
+    const inside = resolveWorkspacePath("/repo/project", "src/index.ts");
+    const outside = resolveWorkspacePath("/repo/project", "../secret.txt");
+
+    expect(inside.isInside).toBe(true);
+    expect(outside.isInside).toBe(false);
+  });
+});
+
+describe("command classifier", () => {
+  it("allows common test commands", () => {
+    expect(classifyCommand("npm test").decision).toBe("allow");
+    expect(classifyCommand("node --test").decision).toBe("allow");
+  });
+
+  it("asks for installs and denies destructive deletes", () => {
+    expect(classifyCommand("pnpm add left-pad").decision).toBe("ask");
+    expect(classifyCommand("rm -rf .").decision).toBe("deny");
+  });
+});
+
+describe("permission engine", () => {
+  const engine = new PermissionEngine();
+
+  it("allows workspace writes in Safe YOLO", () => {
+    const decision = engine.decide({
+      mode: "yolo",
+      workspaceRoot: "/repo/project",
+      toolCall: {
+        id: "call_1",
+        name: "file.patch",
+        input: { path: "src/index.ts", search: "a", replace: "b" },
+      },
+    });
+    expect(decision.decision).toBe("allow");
+  });
+
+  it("classifies phase 2 web and mcp tools", () => {
+    const web = engine.decide({
+      mode: "yolo",
+      workspaceRoot: "/repo/project",
+      toolCall: {
+        id: "call_web",
+        name: "web.fetch",
+        input: { url: "https://example.com" },
+      },
+    });
+    const mcp = engine.decide({
+      mode: "yolo",
+      workspaceRoot: "/repo/project",
+      toolCall: {
+        id: "call_mcp",
+        name: "mcp.call",
+        input: { server: "fake", tool: "echo" },
+      },
+    });
+
+    expect(web.decision).toBe("allow");
+    expect(mcp.decision).toBe("ask");
+  });
+
+  it("denies external writes and asks before sensitive reads", () => {
+    const externalWrite = engine.decide({
+      mode: "yolo",
+      workspaceRoot: "/repo/project",
+      toolCall: {
+        id: "call_2",
+        name: "file.write",
+        input: { path: "../outside.txt", content: "nope" },
+      },
+    });
+    const secretRead = engine.decide({
+      mode: "yolo",
+      workspaceRoot: "/repo/project",
+      toolCall: {
+        id: "call_3",
+        name: "file.read",
+        input: { path: ".env" },
+      },
+    });
+
+    expect(externalWrite.decision).toBe("deny");
+    expect(secretRead.decision).toBe("ask");
+    expect(secretRead.risk).toContain("secret_access");
+  });
+
+  it("allows ordinary external reads and only auto-allows sensitive reads in full mode", () => {
+    const workspaceRoot = "/repo/project";
+    const externalRead = engine.decide({
+      mode: "yolo",
+      workspaceRoot,
+      toolCall: { id: "external", name: "file.read", input: { file_path: "/tmp/report.txt" } },
+    });
+    const sensitiveSearch = engine.decide({
+      mode: "guided",
+      workspaceRoot,
+      toolCall: { id: "search", name: "search.glob", input: { pattern: ".env", path: "/tmp" } },
+    });
+    const fullSensitiveRead = engine.decide({
+      mode: "full",
+      workspaceRoot,
+      toolCall: { id: "secret", name: "file.read", input: { file_path: "/tmp/.env" } },
+    });
+
+    expect(externalRead).toMatchObject({ decision: "allow", risk: ["read_external_path"] });
+    expect(sensitiveSearch.decision).toBe("ask");
+    expect(sensitiveSearch.risk).toEqual(
+      expect.arrayContaining(["secret_access", "read_external_path"]),
+    );
+    expect(fullSensitiveRead.decision).toBe("allow");
+    expect(fullSensitiveRead.risk).toEqual(
+      expect.arrayContaining(["secret_access", "read_external_path"]),
+    );
+  });
+
+  it("evaluates shell commands through the unified shell tool", () => {
+    const commands = engine.decide({
+      mode: "yolo",
+      workspaceRoot: "/repo/project",
+      toolCall: {
+        id: "commands",
+        name: process.platform === "win32" ? "pwsh" : "bash",
+        input: {
+          command: "pnpm add left-pad",
+          run_in_background: false,
+        },
+      },
+    });
+
+    expect(commands.decision).toBe("ask");
+    expect(commands.risk).toContain("install_dependency");
+  });
+
+  it("classifies shell commands and audits an external cwd without extra approval", () => {
+    const workspaceRoot = process.cwd();
+    const externalCwd = path.resolve(workspaceRoot, "..");
+    const guided = engine.decide({
+      mode: "guided",
+      workspaceRoot,
+      toolCall: {
+        id: "process_guided",
+        name: process.platform === "win32" ? "pwsh" : "bash",
+        input: { command: "npm test", cwd: externalCwd },
+      },
+    });
+    const full = engine.decide({
+      mode: "full",
+      workspaceRoot,
+      toolCall: {
+        id: "process_full",
+        name: process.platform === "win32" ? "pwsh" : "bash",
+        input: { command: "npm test", cwd: externalCwd },
+      },
+    });
+    expect(guided.decision).toBe("allow");
+    expect(guided.risk).toContain("read_external_path");
+    expect(full.decision).toBe("allow");
+    expect(full.risk).toContain("read_external_path");
+  });
+
+  it("applies long-running process lifecycle permissions", () => {
+    const workspaceRoot = process.cwd();
+    const planStart = engine.decide({
+      mode: "plan",
+      workspaceRoot,
+      toolCall: {
+        id: "process_start_plan",
+        name: process.platform === "win32" ? "pwsh" : "bash",
+        input: { command: "node server.js", run_in_background: true },
+      },
+    });
+    const guidedStart = engine.decide({
+      mode: "guided",
+      workspaceRoot,
+      toolCall: {
+        id: "process_start_guided",
+        name: process.platform === "win32" ? "pwsh" : "bash",
+        input: { command: "node server.js", run_in_background: true },
+      },
+    });
+    const status = engine.decide({
+      mode: "plan",
+      workspaceRoot,
+      toolCall: {
+        id: "job_output",
+        name: "job_output",
+        input: { job_id: "proc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+      },
+    });
+    const stop = engine.decide({
+      mode: "plan",
+      workspaceRoot,
+      toolCall: {
+        id: "job_kill",
+        name: "job_kill",
+        input: { job_id: "proc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+      },
+    });
+
+    expect(planStart.decision).toBe("deny");
+    expect(planStart.risk).toContain("long_running");
+    expect(guidedStart.decision).toBe("ask");
+    expect(status.decision).toBe("allow");
+    expect(stop.decision).toBe("allow");
+  });
+});
+
+describe("permission capability contract", () => {
+  it("exposes all four modes and highlights the current mode", () => {
+    const contract = buildPermissionCapabilityContract("guided", "win32");
+    expect(Object.keys(contract.modes).sort()).toEqual(["full", "guided", "plan", "yolo"]);
+    expect(contract.generatedFor).toEqual({ platform: "win32", currentMode: "guided" });
+    expect(contract.currentModeSummary).toBe(contract.modes.guided);
+    expect(contract.modes.plan.deny.map((item) => item.id)).toContain("workspace_write");
+    expect(contract.modes.yolo.allow.map((item) => item.id)).toContain("workspace_write");
+    expect(contract.modes.full.deny.map((item) => item.id)).toContain("destructive");
+  });
+});
